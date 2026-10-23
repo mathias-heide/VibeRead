@@ -78,6 +78,29 @@ configured without an API key.
 There is no Vibe Read server, account, or cloud database between the app and
 the configured providers.
 
+## Marking the screen while dictating
+
+While a normal Fn dictation is recording, hold Ctrl and move the mouse over
+something. No click is needed. Releasing Ctrl takes a screenshot of the area
+the pointer covered, and a numbered red outline briefly shows what was captured,
+fading out within half a second. The marks are click-through, so the app underneath keeps
+working. Vibe Read leaves itself out of the screenshot. Ctrl combined with a
+key, such as Ctrl + C, or with another modifier is not treated as a mark.
+
+The whole recording is transcribed in one request, so it is fine to keep
+talking while you mark. Vibe Read asks the provider for word timestamps
+(ElevenLabs, Groq, and OpenAI `whisper-1`). For other providers it estimates
+timing from each word's position in the transcript. Each image is placed at
+the moment you released Ctrl. Released during a pause, it goes into that
+pause. Released while talking, it goes into the nearest gap between words, or
+after a comma or full stop if one is less than a second away.
+
+Vibe Read then pastes the text and screenshots in order into the app that has
+the cursor. Terminal apps such as Claude Code get images with Ctrl + V. Other
+apps get Cmd + V. Your previous clipboard is restored afterwards. Screenshots
+are never sent to a provider. They are kept in the temporary folder for up to
+a day so the clipboard fallback and History can reference them by path.
+
 ## Read-aloud
 
 Read-aloud has two explicit modes. The macOS mode uses `AVSpeechSynthesizer`
@@ -139,6 +162,9 @@ appears only after the user clicks Grant Access or intentionally uses a feature
 that needs the permission.
 
 - **Microphone** is required for dictation.
+- **Screen Recording** is required only for marking the screen while
+  dictating. Request Access in Settings asks for it together with
+  Accessibility, and it is also requested the first time you mark something.
 - **Accessibility** is required for function-key shortcuts, reading selected
   text, and inserting text into other apps. Ordinary global chords such as
   Cmd + E do not require it.

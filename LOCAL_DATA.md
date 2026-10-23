@@ -36,6 +36,11 @@ The main data directory is:
   Custom dictation and custom text actions use separate items. Keys are not
   stored in SQLite or preferences.
 
+Screenshots of areas marked with Ctrl during dictation are written to
+`$TMPDIR/VibeRead/VisualCaptures/` so a clipboard fallback or history entry can
+reference them by path. Files older than a day are removed the next time marks
+are used, and macOS clears the temporary folder on its own schedule.
+
 The SQLite database is not application-level encrypted. Use FileVault and a
 locked macOS account if local-at-rest protection matters for your threat model.
 

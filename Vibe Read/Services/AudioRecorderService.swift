@@ -18,6 +18,10 @@ class AudioRecorderService: NSObject, ObservableObject {
     private var assetWriterInput: AVAssetWriterInput?
     private var currentRecordingURL: URL?
     private var isWriterStarted = false
+    /// Host-clock time (CACurrentMediaTime base) of the first recorded sample,
+    /// which is time zero in the audio file. Draw and Dictate uses it to line
+    /// circles up with provider word timestamps.
+    private(set) var firstSampleHostTime: TimeInterval?
     private var sampleCount = 0  // For throttling audio level updates
     private var detectedSampleRate: Double = 44100  // Will be updated from actual device
 
@@ -199,6 +203,7 @@ class AudioRecorderService: NSObject, ObservableObject {
     // MARK: - Recording
 
     func startRecording() throws -> URL {
+        firstSampleHostTime = nil
         // Always recheck permission right before recording
         updatePermissionStatus()
 
@@ -424,6 +429,7 @@ extension AudioRecorderService: AVCaptureAudioDataOutputSampleBufferDelegate {
             let timestamp = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
             assetWriter?.startSession(atSourceTime: timestamp)
             isWriterStarted = true
+            firstSampleHostTime = CMTimeGetSeconds(timestamp)
 
             // Log the actual format we're receiving (helpful for debugging Bluetooth)
             if let formatDesc = CMSampleBufferGetFormatDescription(sampleBuffer) {

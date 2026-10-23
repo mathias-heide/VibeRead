@@ -38,6 +38,9 @@ class AccessibilityService: ObservableObject {
     static let shared = AccessibilityService()
 
     @Published var hasAccessibilityPermission = false
+    /// Screen Recording is used only to screenshot areas marked with Ctrl
+    /// during dictation. macOS may report a new grant only after a relaunch.
+    @Published var hasScreenRecordingPermission = CGPreflightScreenCaptureAccess()
     @Published var isPollingForPermission = false
 
     private var permissionPollingTimer: Timer?
@@ -126,6 +129,25 @@ class AccessibilityService: ObservableObject {
     /// Manually refresh permission status
     func refreshAllPermissions() {
         _ = checkPermission()
+        hasScreenRecordingPermission = CGPreflightScreenCaptureAccess()
+    }
+
+    /// Requests every missing permission in one go. Microphone access is
+    /// still requested by the first recording.
+    func requestMissingPermissions() {
+        if !hasAccessibilityPermission {
+            requestAccessibilityPermission()
+        }
+        if !CGPreflightScreenCaptureAccess() {
+            CGRequestScreenCaptureAccess()
+        }
+        hasScreenRecordingPermission = CGPreflightScreenCaptureAccess()
+    }
+
+    func openScreenRecordingSettings() {
+        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture") {
+            NSWorkspace.shared.open(url)
+        }
     }
 
     // MARK: - Get Selected Text

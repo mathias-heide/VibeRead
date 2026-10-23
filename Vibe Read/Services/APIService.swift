@@ -19,6 +19,19 @@ struct DictationResult: Codable, Equatable, Sendable {
     }
 }
 
+/// A word with its position in the recording, in seconds.
+struct TimedWord: Equatable, Sendable {
+    let text: String
+    let start: TimeInterval
+    let end: TimeInterval
+}
+
+/// A transcript plus word timings when the provider returns them.
+struct TimedTranscript: Sendable {
+    let text: String
+    let words: [TimedWord]?
+}
+
 struct APITransportResponse: Sendable {
     let data: Data
     let statusCode: Int
@@ -139,58 +152,11 @@ actor APIService {
     ) async throws -> DictationResult {
         _ = clientId // Retained for compatibility with migrated local history.
 
-        if let fileSize = try? audioURL.resourceValues(forKeys: [.fileSizeKey]).fileSize,
-           fileSize > Self.maximumAudioFileBytes {
-            throw APIError.audioFileTooLarge(
-                maximumMegabytes: Self.maximumAudioMegabytes
-            )
-        }
-        let audio = try Data(contentsOf: audioURL)
-        guard audio.count <= Self.maximumAudioFileBytes else {
-            throw APIError.audioFileTooLarge(
-                maximumMegabytes: Self.maximumAudioMegabytes
-            )
-        }
-        let fileExtension = Self.normalizedAudioExtension(audioURL.pathExtension)
-        let configuration = try await loadDictationConfiguration()
-        try Self.validateAudioFormat(fileExtension, for: configuration)
-
-        let raw: String
-        switch configuration {
-        case .elevenLabs(let elevenLabs):
-            raw = try await transcribeWithElevenLabs(
-                audio: audio,
-                fileExtension: fileExtension,
-                configuration: elevenLabs
-            )
-        case .groq(let groq):
-            raw = try await transcribeWithGroq(
-                audio: audio,
-                fileExtension: fileExtension,
-                vocabulary: vocabulary,
-                configuration: groq
-            )
-        case .openRouter(let openRouter):
-            raw = try await transcribeWithOpenRouter(
-                audio: audio,
-                fileExtension: fileExtension,
-                configuration: openRouter
-            )
-        case .openAI(let openAI):
-            raw = try await transcribeWithOpenAI(
-                audio: audio,
-                fileExtension: fileExtension,
-                vocabulary: vocabulary,
-                configuration: openAI
-            )
-        case .customOpenAICompatible(let custom):
-            raw = try await transcribeWithCustomProvider(
-                audio: audio,
-                fileExtension: fileExtension,
-                vocabulary: vocabulary,
-                configuration: custom
-            )
-        }
+        let raw = try await transcribeAudio(
+            audioURL: audioURL,
+            vocabulary: vocabulary,
+            wordTimings: false
+        ).text
 
         guard let transformPrompt = Self.nonempty(transformPrompt) else {
             return DictationResult(rawTranscript: raw, polishedText: raw, durationMs: nil)
@@ -207,6 +173,77 @@ actor APIService {
                 polishedText: raw,
                 durationMs: nil,
                 warning: Self.cleanupWarning(for: error)
+            )
+        }
+    }
+
+    /// Draw and Dictate needs to know when each word was spoken. ElevenLabs,
+    /// Groq, and OpenAI whisper-1 return word timings; other providers return
+    /// plain text and the caller estimates positions instead.
+    func transcribeWithWordTimings(
+        audioURL: URL,
+        vocabulary: [String] = []
+    ) async throws -> TimedTranscript {
+        try await transcribeAudio(audioURL: audioURL, vocabulary: vocabulary, wordTimings: true)
+    }
+
+    private func transcribeAudio(
+        audioURL: URL,
+        vocabulary: [String],
+        wordTimings: Bool
+    ) async throws -> TimedTranscript {
+        if let fileSize = try? audioURL.resourceValues(forKeys: [.fileSizeKey]).fileSize,
+           fileSize > Self.maximumAudioFileBytes {
+            throw APIError.audioFileTooLarge(
+                maximumMegabytes: Self.maximumAudioMegabytes
+            )
+        }
+        let audio = try Data(contentsOf: audioURL)
+        guard audio.count <= Self.maximumAudioFileBytes else {
+            throw APIError.audioFileTooLarge(
+                maximumMegabytes: Self.maximumAudioMegabytes
+            )
+        }
+        let fileExtension = Self.normalizedAudioExtension(audioURL.pathExtension)
+        let configuration = try await loadDictationConfiguration()
+        try Self.validateAudioFormat(fileExtension, for: configuration)
+
+        switch configuration {
+        case .elevenLabs(let elevenLabs):
+            return try await transcribeWithElevenLabs(
+                audio: audio,
+                fileExtension: fileExtension,
+                configuration: elevenLabs,
+                wordTimings: wordTimings
+            )
+        case .groq(let groq):
+            return try await transcribeWithGroq(
+                audio: audio,
+                fileExtension: fileExtension,
+                vocabulary: vocabulary,
+                configuration: groq,
+                wordTimings: wordTimings
+            )
+        case .openRouter(let openRouter):
+            return try await transcribeWithOpenRouter(
+                audio: audio,
+                fileExtension: fileExtension,
+                configuration: openRouter
+            )
+        case .openAI(let openAI):
+            return try await transcribeWithOpenAI(
+                audio: audio,
+                fileExtension: fileExtension,
+                vocabulary: vocabulary,
+                configuration: openAI,
+                wordTimings: wordTimings
+            )
+        case .customOpenAICompatible(let custom):
+            return try await transcribeWithCustomProvider(
+                audio: audio,
+                fileExtension: fileExtension,
+                vocabulary: vocabulary,
+                configuration: custom
             )
         }
     }
@@ -329,8 +366,9 @@ actor APIService {
     private func transcribeWithElevenLabs(
         audio: Data,
         fileExtension: String,
-        configuration: ElevenLabsDictationConfiguration
-    ) async throws -> String {
+        configuration: ElevenLabsDictationConfiguration,
+        wordTimings: Bool = false
+    ) async throws -> TimedTranscript {
         try requireAPIKey(configuration.apiKey, for: .elevenLabs)
 
         let boundary = UUID().uuidString
@@ -349,7 +387,7 @@ actor APIService {
         )
         appendMultipartField(
             name: "timestamps_granularity",
-            value: "none",
+            value: wordTimings ? "word" : "none",
             boundary: boundary,
             to: &body
         )
@@ -395,18 +433,20 @@ actor APIService {
         audio: Data,
         fileExtension: String,
         vocabulary: [String],
-        configuration: GroqDictationConfiguration
-    ) async throws -> String {
+        configuration: GroqDictationConfiguration,
+        wordTimings: Bool = false
+    ) async throws -> TimedTranscript {
         try requireAPIKey(configuration.apiKey, for: .groq)
         try requireModel(configuration.model, feature: "Groq dictation")
 
-        let fields = openAIMultipartFields(
+        var fields = openAIMultipartFields(
             model: configuration.model,
             languageField: "language",
             languageCode: configuration.languageCode,
             vocabulary: vocabulary,
             includeKeywords: false
         )
+        if wordTimings { Self.requestWordTimestamps(in: &fields) }
         let request = makeMultipartTranscriptionRequest(
             baseURL: AIProviderSettings.groqProviderBaseURL,
             apiKey: configuration.apiKey,
@@ -422,7 +462,7 @@ actor APIService {
         audio: Data,
         fileExtension: String,
         configuration: OpenRouterDictationConfiguration
-    ) async throws -> String {
+    ) async throws -> TimedTranscript {
         try requireAPIKey(configuration.apiKey, for: .openRouter)
         try requireModel(configuration.model, feature: "OpenRouter dictation")
 
@@ -450,19 +490,24 @@ actor APIService {
         audio: Data,
         fileExtension: String,
         vocabulary: [String],
-        configuration: OpenAIDictationConfiguration
-    ) async throws -> String {
+        configuration: OpenAIDictationConfiguration,
+        wordTimings: Bool = false
+    ) async throws -> TimedTranscript {
         try requireAPIKey(configuration.apiKey, for: .openAI)
         try requireModel(configuration.model, feature: "OpenAI dictation")
 
         let usesGPTTranscribeContract = configuration.model == "gpt-transcribe"
-        let fields = openAIMultipartFields(
+        var fields = openAIMultipartFields(
             model: configuration.model,
             languageField: usesGPTTranscribeContract ? "languages[]" : "language",
             languageCode: configuration.languageCode,
             vocabulary: vocabulary,
             includeKeywords: usesGPTTranscribeContract
         )
+        // Only whisper-1 supports verbose_json with word timestamps.
+        if wordTimings && configuration.model == "whisper-1" {
+            Self.requestWordTimestamps(in: &fields)
+        }
         let request = makeMultipartTranscriptionRequest(
             baseURL: AIProviderSettings.openAIProviderBaseURL,
             apiKey: configuration.apiKey,
@@ -479,7 +524,7 @@ actor APIService {
         fileExtension: String,
         vocabulary: [String],
         configuration: CustomOpenAICompatibleDictationConfiguration
-    ) async throws -> String {
+    ) async throws -> TimedTranscript {
         guard let baseURL = AIProviderSettings.validatedProviderURL(
             configuration.baseURL.absoluteString
         ) else {
@@ -538,6 +583,12 @@ actor APIService {
         return fields
     }
 
+    private static func requestWordTimestamps(in fields: inout [(String, String)]) {
+        fields.removeAll { $0.0 == "response_format" }
+        fields.append(("response_format", "verbose_json"))
+        fields.append(("timestamp_granularities[]", "word"))
+    }
+
     private func makeMultipartTranscriptionRequest(
         baseURL: URL,
         apiKey: String,
@@ -574,7 +625,7 @@ actor APIService {
         return request
     }
 
-    private func decodeTranscript(from data: Data, providerName: String) throws -> String {
+    private func decodeTranscript(from data: Data, providerName: String) throws -> TimedTranscript {
         let response: TranscriptionResponse
         do {
             response = try JSONDecoder().decode(TranscriptionResponse.self, from: data)
@@ -583,7 +634,17 @@ actor APIService {
         }
         let text = response.text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { throw APIError.emptyTranscript(providerName) }
-        return text
+        // ElevenLabs uses `text` and also lists spacing entries; Whisper uses `word`.
+        let words = response.words?.compactMap { word -> TimedWord? in
+            guard word.type == nil || word.type == "word",
+                  let value = (word.text ?? word.word)?
+                    .trimmingCharacters(in: .whitespacesAndNewlines),
+                  !value.isEmpty,
+                  let start = word.start,
+                  let end = word.end else { return nil }
+            return TimedWord(text: value, start: start, end: end)
+        }
+        return TimedTranscript(text: text, words: words?.isEmpty == false ? words : nil)
     }
 
     private func connectionRequest(
@@ -1106,7 +1167,25 @@ private struct TextEndpoint: Sendable {
 }
 
 private struct TranscriptionResponse: Decodable, Sendable {
+    struct Word: Decodable, Sendable {
+        let text: String?
+        let word: String?
+        let start: TimeInterval?
+        let end: TimeInterval?
+        let type: String?
+    }
+
     let text: String
+    let words: [Word]?
+
+    enum CodingKeys: String, CodingKey { case text, words }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        text = try container.decode(String.self, forKey: .text)
+        // Timings are optional extras; a surprising shape must never cost the transcript.
+        words = try? container.decodeIfPresent([Word].self, forKey: .words)
+    }
 }
 
 private struct OpenRouterTranscriptionRequest: Encodable, Sendable {

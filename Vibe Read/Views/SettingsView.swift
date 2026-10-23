@@ -85,24 +85,38 @@ private struct LocalGeneralSettings: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 24) {
-            SettingsSection(title: "Accessibility") {
+            SettingsSection(title: "Permissions") {
                 Label(
                     accessibility.hasAccessibilityPermission
                         ? "Accessibility access granted"
-                        : "Selected text, function-key shortcuts, and pasting need access",
+                        : "Selected text, function-key shortcuts, and pasting need Accessibility",
                     systemImage: accessibility.hasAccessibilityPermission
                         ? "checkmark.circle.fill"
                         : "accessibility"
                 )
                 .foregroundColor(accessibility.hasAccessibilityPermission ? .green : .secondary)
 
-                if !accessibility.hasAccessibilityPermission {
+                Label(
+                    accessibility.hasScreenRecordingPermission
+                        ? "Screen Recording access granted"
+                        : "Marking the screen with Ctrl while dictating needs Screen Recording",
+                    systemImage: accessibility.hasScreenRecordingPermission
+                        ? "checkmark.circle.fill"
+                        : "rectangle.dashed"
+                )
+                .foregroundColor(accessibility.hasScreenRecordingPermission ? .green : .secondary)
+
+                if !accessibility.hasAccessibilityPermission || !accessibility.hasScreenRecordingPermission {
                     HStack {
-                        Button("Request Accessibility") {
-                            accessibility.requestAccessibilityPermission()
+                        Button("Request Access") {
+                            accessibility.requestMissingPermissions()
                         }
                         Button("Open System Settings") {
-                            accessibility.openAccessibilitySettings()
+                            if accessibility.hasAccessibilityPermission {
+                                accessibility.openScreenRecordingSettings()
+                            } else {
+                                accessibility.openAccessibilitySettings()
+                            }
                         }
                         Button("Check Again") {
                             accessibility.refreshAllPermissions()
@@ -111,7 +125,7 @@ private struct LocalGeneralSettings: View {
                     }
                 }
 
-                Text("Choose Request Accessibility once, then turn on Vibe Read in the macOS prompt. This is required for Fn shortcuts and pasting into other apps. Ordinary shortcuts such as Cmd + E work without it.")
+                Text("Choose Request Access once, then turn on Vibe Read in the macOS prompts. Accessibility is required for Fn shortcuts and pasting into other apps; ordinary shortcuts such as Cmd + E work without it. Screen Recording is only used to screenshot areas you mark with Ctrl during dictation, and macOS may ask you to reopen Vibe Read after granting it.")
                     .font(.caption)
                     .foregroundColor(.secondary)
             }

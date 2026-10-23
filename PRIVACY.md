@@ -16,6 +16,11 @@ document describes the current app's data flow.
   or indefinite retention.
 - Saved text, extracted pages, summaries, and bookmarks are stored in
   `library.json` under the same local Application Support directory.
+- Screenshots of areas marked with Ctrl during dictation are written as PNG
+  files to the macOS temporary folder, so the clipboard fallback and history
+  can reference them by path. Files older than a day are deleted the next time
+  marks are used, and macOS also clears that folder. The history text for such
+  a dictation contains those file paths.
 - Shortcuts, provider choices, provider URL and model identifiers, dictation
   language, vocabulary, retention choice, Smart Dictation prompt, and
   user-defined action prompts are stored in macOS preferences. The selected
@@ -78,6 +83,12 @@ These requests include the selected model where applicable and may include an
 explicit language. Vocabulary can also be included for providers that support
 the app's prompt field. The raw transcript returned by the provider is stored
 locally.
+
+When areas of the screen were marked with Ctrl during a dictation, the same
+request also asks for word timestamps (ElevenLabs, Groq, and OpenAI
+`whisper-1`) so screenshots can be placed where they were spoken. Screenshots
+themselves are never sent to any provider. They are only pasted into the app
+that has the cursor.
 
 ### Text processing
 
@@ -163,8 +174,12 @@ feature that needs it.
 - **Accessibility:** observes function-key shortcuts, reads selected text, and
   inserts text into other applications. Ordinary global chords such as Cmd + E
   do not require this permission.
-- **Clipboard:** temporarily stages automatic paste text, supports explicit
-  copy actions, and provides a confirmed fallback after known paste failures.
+- **Screen Recording:** takes a screenshot of an area only when the user marks
+  it with Ctrl during a dictation. Requested from Settings together with
+  Accessibility, or the first time a mark is made.
+- **Clipboard:** temporarily stages automatic paste text and marked
+  screenshots, supports explicit copy actions, and provides a confirmed
+  fallback after known paste failures.
 
 Selected text used by an action is held in memory for the operation and is not
 added to dictation history.

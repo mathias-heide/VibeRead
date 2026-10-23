@@ -100,6 +100,10 @@ class DictationService: ObservableObject {
     private var activeClientID: UUID?
     private var activePasteTarget: UniversalActionTarget?
     private var activeContextApplicationName: String?
+    /// Screenshots marked with Ctrl during a normal or hands-free recording.
+    /// Kept until the recording is delivered or discarded so Undo after
+    /// Cancel still has them.
+    private var visualCaptureTasks: [Task<VisualCapture?, Never>] = []
 
     private struct PendingClipboardCopy {
         let id: UUID
@@ -336,6 +340,9 @@ class DictationService: ObservableObject {
 
     private func cancelRecordingWithUndo() {
         stopRecordingTimer()
+        if VisualAnnotationOverlay.shared.isActive {
+            visualCaptureTasks = VisualAnnotationOverlay.shared.finish()
+        }
         // Stop recording but keep the file for potential undo
         if let url = recorder.stopRecording() {
             pendingCancelURL = url
@@ -412,6 +419,7 @@ class DictationService: ObservableObject {
         pendingCancelPasteTarget = nil
         pendingCancelContextApplicationName = nil
         pendingCancelCapturesTargetOnUndo = false
+        visualCaptureTasks = []
     }
 
     private func beginRecording(
@@ -419,6 +427,7 @@ class DictationService: ObservableObject {
         requiresHeldShortcut: Bool = false
     ) {
         clearPendingClipboardConfirmation()
+        visualCaptureTasks = []
 
         // The permission sheet is asynchronous while the public state remains
         // idle. Ignore repeated shortcut starts until that exact request has
@@ -453,8 +462,10 @@ class DictationService: ObservableObject {
             switch mode {
             case .normal:
                 state = .recording
+                VisualAnnotationOverlay.shared.begin()
             case .handsFree:
                 state = .recordingHandsFree
+                VisualAnnotationOverlay.shared.begin()
             case .command:
                 state = .recordingCommand
             case .smart:
@@ -547,6 +558,9 @@ class DictationService: ObservableObject {
         // destination. Hold this target through the provider request, then
         // revalidate it immediately before posting Cmd+V.
         let pasteTarget = Self.frontmostApplicationTarget()
+        if VisualAnnotationOverlay.shared.isActive {
+            visualCaptureTasks = VisualAnnotationOverlay.shared.finish()
+        }
 
         guard let url = recorder.stopRecording() else {
             activePasteTarget = nil
@@ -603,15 +617,36 @@ class DictationService: ObservableObject {
         activePasteTarget = pasteTarget
         activeContextApplicationName = capturedContextApplicationName
 
+        let captureTasks = visualCaptureTasks
+
         transcriptionTask = Task { [weak self] in
             guard let self else { return }
             do {
-                let result = try await APIService.shared.transcribeDictation(
-                    audioURL: url,
-                    vocabulary: AppSettings.shared.customVocabulary,
-                    transformPrompt: transformPrompt,
-                    clientId: clientID.uuidString
-                )
+                var collectedCaptures: [VisualCapture] = []
+                for task in captureTasks {
+                    if let capture = await task.value { collectedCaptures.append(capture) }
+                }
+                let captures = collectedCaptures
+                let result: DictationResult
+                let visualParts: [VisualDictation.Part]
+                if captures.isEmpty {
+                    visualParts = []
+                    result = try await APIService.shared.transcribeDictation(
+                        audioURL: url,
+                        vocabulary: AppSettings.shared.customVocabulary,
+                        transformPrompt: transformPrompt,
+                        clientId: clientID.uuidString
+                    )
+                } else {
+                    visualParts = try await Self.transcribeVisual(audioURL: url, captures: captures)
+                    let imagePaths = VisualDictation.saveCaptures(captures)
+                    let text = VisualDictation.plainText(parts: visualParts) { index in
+                        imagePaths.indices.contains(index)
+                            ? "[Image \(index + 1): \(imagePaths[index].path)]"
+                            : "[Image \(index + 1)]"
+                    }
+                    result = DictationResult(rawTranscript: text, polishedText: text, durationMs: nil)
+                }
                 try Task.checkCancellation()
 
                 await MainActor.run {
@@ -631,6 +666,16 @@ class DictationService: ObservableObject {
                     )
 
                     // Handle based on mode
+                    if !visualParts.isEmpty {
+                        self.deliverVisual(
+                            parts: visualParts,
+                            captures: captures,
+                            fallbackText: result.polishedText,
+                            pasteTarget: pasteTarget,
+                            tempAudioURL: url
+                        )
+                        return
+                    }
                     switch mode {
                     case .normal, .handsFree, .smart:
                         if case .smart = mode, result.warning != nil {
@@ -717,6 +762,76 @@ class DictationService: ObservableObject {
 
                     self.scheduleErrorDismissal()
                 }
+            }
+        }
+    }
+
+    /// Transcribes the whole recording once, so speech that overlaps drawing
+    /// stays intact, then places each screenshot using word timings.
+    private static func transcribeVisual(
+        audioURL: URL,
+        captures: [VisualCapture]
+    ) async throws -> [VisualDictation.Part] {
+        let transcript = try await APIService.shared.transcribeWithWordTimings(
+            audioURL: audioURL,
+            vocabulary: AppSettings.shared.customVocabulary
+        )
+        let words = transcript.words ?? VisualDictation.estimatedWords(
+            transcript: transcript.text,
+            duration: VisualDictation.audioDuration(of: audioURL)
+        )
+        let texts = VisualDictation.segmentTexts(
+            transcript: transcript.text,
+            words: words,
+            anchors: captures.map(\.offset)
+        )
+        return VisualDictation.parts(segmentTexts: texts, imageCount: captures.count)
+    }
+
+    /// Escape during delivery cancels it; any other state means it is over.
+    private var isDeliveringVisual: Bool {
+        switch state {
+        case .transcribing, .transcribingHandsFree, .transcribingSlow: return true
+        default: return false
+        }
+    }
+
+    /// Pastes text and screenshots in spoken order. The HUD stays in its
+    /// processing state until the last paste so no new recording can start
+    /// while the clipboard is being used.
+    private func deliverVisual(
+        parts: [VisualDictation.Part],
+        captures: [VisualCapture],
+        fallbackText: String,
+        pasteTarget: UniversalActionTarget?,
+        tempAudioURL: URL
+    ) {
+        try? FileManager.default.removeItem(at: tempAudioURL)
+        recordingURL = nil
+        transcriptionTask = nil
+        activeTranscriptionID = nil
+        visualCaptureTasks = []
+        clearActiveTranscriptionResources()
+
+        Task { @MainActor [weak self] in
+            var delivered = false
+            if AppSettings.shared.autoPasteAfterDictation, let pasteTarget {
+                delivered = await VisualDictation.deliver(
+                    parts: parts,
+                    captures: captures,
+                    target: pasteTarget,
+                    shouldContinue: { [weak self] in self?.isDeliveringVisual == true }
+                )
+            }
+            guard let self, self.isDeliveringVisual else { return }
+            if delivered {
+                self.state = .done
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+                    if case .done = self?.state { self?.state = .idle }
+                }
+            } else {
+                // Image paths keep the screenshots usable from the clipboard.
+                self.offerClipboardFallback(fallbackText)
             }
         }
     }
@@ -944,6 +1059,8 @@ class DictationService: ObservableObject {
     /// provider response.
     func discardActiveWork() {
         stopRecordingTimer()
+        VisualAnnotationOverlay.shared.end()
+        visualCaptureTasks = []
         stopTranscriptionTimer()
         stopUndoTimer()
         clearPendingClipboardConfirmation()
