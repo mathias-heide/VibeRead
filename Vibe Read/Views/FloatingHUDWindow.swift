@@ -216,7 +216,8 @@ class FloatingHUDController: NSObject, ObservableObject {
         window?.hidesOnDeactivate = false
         window?.becomesKeyOnlyIfNeeded = true
         window?.animationBehavior = .none
-        window?.hasShadow = true
+        // No window shadow: it drew a rim and a gap under the pill.
+        window?.hasShadow = false
         window?.ignoresMouseEvents = true // Click-through by default
 
         applyWindowLayout()
@@ -1561,11 +1562,7 @@ private struct DictationPillWithWarning: View {
             }
             .padding(.horizontal, 10)
             .frame(height: 32)
-            .background(
-                Capsule()
-                    .fill(.ultraThinMaterial)
-                    .shadow(color: .black.opacity(0.12), radius: 4, y: 2)
-            )
+            .modifier(GlassCapsule())
         }
         .onAppear {
             startSilenceDetection()
@@ -1602,6 +1599,17 @@ private struct DictationPillWithWarning: View {
     private func stopSilenceDetection() {
         silenceTimer?.invalidate()
         silenceTimer = nil
+    }
+}
+
+/// Plain glass pill with no border or shadow.
+private struct GlassCapsule: ViewModifier {
+    func body(content: Content) -> some View {
+        if #available(macOS 26.0, *) {
+            content.glassEffect(.regular, in: Capsule())
+        } else {
+            content.background(Capsule().fill(.ultraThinMaterial))
+        }
     }
 }
 
