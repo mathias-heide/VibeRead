@@ -1604,12 +1604,18 @@ private struct DictationPillWithWarning: View {
 
 /// Plain glass pill with no border or shadow.
 private struct GlassCapsule: ViewModifier {
+    @ViewBuilder
     func body(content: Content) -> some View {
+        // Xcode 16 has no Liquid Glass API, so CI builds use the material.
+        #if compiler(>=6.2)
         if #available(macOS 26.0, *) {
             content.glassEffect(.regular, in: Capsule())
         } else {
             content.background(Capsule().fill(.ultraThinMaterial))
         }
+        #else
+        content.background(Capsule().fill(.ultraThinMaterial))
+        #endif
     }
 }
 
