@@ -522,6 +522,35 @@ private func productResponse(
     return response
 }
 
+struct PasteShortcutTests {
+    @Test func remoteDesktopPasteWrapsVInRealCommandKeyEvents() throws {
+        let events = try #require(AccessibilityService.shortcutEvents(
+            keyCode: 9,
+            modifiers: .maskCommand,
+            pressModifierKey: true
+        ))
+
+        #expect(events.map(\.type) == [.flagsChanged, .keyDown, .keyUp, .flagsChanged])
+        #expect(events.map { $0.getIntegerValueField(.keyboardEventKeycode) } == [55, 9, 9, 55])
+        #expect(events[0].flags.contains(.maskCommand))
+        #expect(events[1].flags.contains(.maskCommand))
+        #expect(events[2].flags.contains(.maskCommand))
+        #expect(!events[3].flags.contains(.maskCommand))
+        #expect(AccessibilityService.remoteDesktopBundleIdentifiers.contains("tv.parsec.www"))
+    }
+
+    @Test func localPasteStaysASingleCommandV() throws {
+        let events = try #require(AccessibilityService.shortcutEvents(
+            keyCode: 9,
+            modifiers: .maskCommand,
+            pressModifierKey: false
+        ))
+
+        #expect(events.map(\.type) == [.keyDown, .keyUp])
+        #expect(events.allSatisfy { $0.flags.contains(.maskCommand) })
+    }
+}
+
 private enum ProductTestFailure: Error {
     case missingURL
     case invalidResponse
