@@ -216,6 +216,7 @@ enum VisualDictation {
     ) async -> Bool {
         guard AXIsProcessTrusted() else { return false }
         let isTerminal = terminalBundleIdentifiers.contains(target.bundleIdentifier)
+        let isRemote = AccessibilityService.remoteDesktopBundleIdentifiers.contains(target.bundleIdentifier)
         let pasteboard = NSPasteboard.general
         let previousItems = (pasteboard.pasteboardItems ?? []).map { item -> NSPasteboardItem in
             let copy = NSPasteboardItem()
@@ -233,7 +234,7 @@ enum VisualDictation {
             guard shouldContinue(), isFrontmost(target) else { return position > 0 }
             let started = CACurrentMediaTime()
             let provider: LazyPasteboardData
-            let settle: TimeInterval
+            var settle: TimeInterval
             switch part {
             case .text(let text):
                 // Spaces keep words from touching the image placeholders.
@@ -248,7 +249,17 @@ enum VisualDictation {
             }
             pasteboard.clearContents()
             pasteboard.writeObjects([provider.item])
-            postPaste(control: isTerminal && provider.isImage)
+            if isRemote {
+                // Remote desktop apps need real Command key events and time to
+                // sync the clipboard to the remote side before and after Cmd+V.
+                try? await Task.sleep(nanoseconds: 250_000_000)
+                _ = await Task.detached {
+                    AccessibilityService.postShortcut(keyCode: 9, modifiers: .maskCommand, pressModifierKey: true)
+                }.value
+                settle = 1.0
+            } else {
+                postPaste(control: isTerminal && provider.isImage)
+            }
             // Move on as soon as the app has read the clipboard, plus a short
             // pause for it to insert the content. Apps that never read the
             // data lazily fall back to the timeout.

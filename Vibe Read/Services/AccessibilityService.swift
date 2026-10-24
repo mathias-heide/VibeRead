@@ -235,26 +235,96 @@ class AccessibilityService: ObservableObject {
         return nil
     }
 
-    /// Simulate a key press with modifiers. Returning false means the event
-    /// could not be constructed, so callers can keep a clipboard fallback.
-    private func simulateKeyPress(keyCode: CGKeyCode, modifiers: CGEventFlags) -> Bool {
+    /// Remote desktop apps send keys to another computer. They track modifier
+    /// state from real modifier key events, so a V that only carries the
+    /// Command flag arrives as a bare "v". They also sync the clipboard to the
+    /// remote side on their own schedule, so the paste needs more time.
+    static let remoteDesktopBundleIdentifiers: Set<String> = [
+        "tv.parsec.www",
+        "com.microsoft.rdc.macos",
+        "com.p5sys.jump.mac.viewer",
+        "com.teamviewer.TeamViewer",
+        "com.philandro.anydesk",
+        "com.carriez.rustdesk"
+    ]
+
+    /// Events for a shortcut such as Cmd+V. With `pressModifierKey`, the key is
+    /// wrapped in real Command (or Control) key down and up events, like a
+    /// physical keyboard. Returns nil if an event could not be constructed.
+    static func shortcutEvents(
+        keyCode: CGKeyCode,
+        modifiers: CGEventFlags,
+        pressModifierKey: Bool
+    ) -> [CGEvent]? {
         let source = CGEventSource(stateID: .hidSystemState)
-
-        guard let keyDown = CGEvent(
-            keyboardEventSource: source,
-            virtualKey: keyCode,
-            keyDown: true
-        ), let keyUp = CGEvent(
-            keyboardEventSource: source,
-            virtualKey: keyCode,
-            keyDown: false
-        ) else { return false }
-
+        guard let keyDown = CGEvent(keyboardEventSource: source, virtualKey: keyCode, keyDown: true),
+              let keyUp = CGEvent(keyboardEventSource: source, virtualKey: keyCode, keyDown: false) else {
+            return nil
+        }
         keyDown.flags = modifiers
         keyUp.flags = modifiers
-        keyDown.post(tap: .cghidEventTap)
-        keyUp.post(tap: .cghidEventTap)
+        guard pressModifierKey else { return [keyDown, keyUp] }
+
+        // kVK_Command = 55, kVK_Control = 59. CoreGraphics turns these into
+        // flagsChanged events with the matching modifier flags.
+        let modifierKey: CGKeyCode = modifiers.contains(.maskCommand) ? 55 : 59
+        guard let modifierDown = CGEvent(keyboardEventSource: source, virtualKey: modifierKey, keyDown: true),
+              let modifierUp = CGEvent(keyboardEventSource: source, virtualKey: modifierKey, keyDown: false) else {
+            return nil
+        }
+        return [modifierDown, keyDown, keyUp, modifierUp]
+    }
+
+    /// Post a shortcut. Returning false means the event could not be
+    /// constructed, so callers can keep a clipboard fallback. With real
+    /// modifier keys, short gaps let remote apps see the modifier first; call
+    /// that variant off the main thread.
+    @discardableResult
+    static func postShortcut(
+        keyCode: CGKeyCode,
+        modifiers: CGEventFlags,
+        pressModifierKey: Bool
+    ) -> Bool {
+        guard let events = shortcutEvents(
+            keyCode: keyCode,
+            modifiers: modifiers,
+            pressModifierKey: pressModifierKey
+        ) else { return false }
+        for (index, event) in events.enumerated() {
+            if pressModifierKey && (index == 1 || index == 3) {
+                usleep(30_000)
+            }
+            event.post(tap: .cghidEventTap)
+        }
         return true
+    }
+
+    static func isRemoteDesktop(_ target: UniversalActionTarget?) -> Bool {
+        let bundleIdentifier = target?.bundleIdentifier.isEmpty == false
+            ? target?.bundleIdentifier
+            : NSWorkspace.shared.frontmostApplication?.bundleIdentifier
+        return remoteDesktopBundleIdentifiers.contains(bundleIdentifier ?? "")
+    }
+
+    /// Cmd+V for paste. Remote desktop apps get real Command key events, sent
+    /// after a short wait so they have synced the clipboard to the remote side.
+    private static func postPasteShortcut(remote: Bool) -> Bool {
+        guard remote else {
+            return postShortcut(keyCode: 9, modifiers: .maskCommand, pressModifierKey: false)
+        }
+        guard shortcutEvents(keyCode: 9, modifiers: .maskCommand, pressModifierKey: true) != nil else {
+            return false
+        }
+        DispatchQueue.global(qos: .userInteractive).asyncAfter(deadline: .now() + 0.25) {
+            postShortcut(keyCode: 9, modifiers: .maskCommand, pressModifierKey: true)
+        }
+        return true
+    }
+
+    /// Remote desktop apps read the clipboard late, so keep the transcript on
+    /// it longer before the user's clipboard comes back.
+    private static func restoreDelay(remote: Bool) -> TimeInterval {
+        remote ? 1.5 : 0.35
     }
 
     // MARK: - Paste Text
@@ -308,6 +378,7 @@ class AccessibilityService: ObservableObject {
         _ text: String,
         expectedTarget: UniversalActionTarget? = nil
     ) -> AutoPasteOutcome {
+        let remote = Self.isRemoteDesktop(expectedTarget)
         let outcome = Self.deliverTextPreservingClipboard(
             text,
             expectedTarget: expectedTarget,
@@ -323,11 +394,11 @@ class AccessibilityService: ObservableObject {
                     applicationName: application.localizedName ?? "the original app"
                 )
             },
-            postPasteShortcut: { [weak self] in
-                self?.simulateKeyPress(keyCode: 9, modifiers: .maskCommand) ?? false
+            postPasteShortcut: {
+                Self.postPasteShortcut(remote: remote)
             },
             scheduleRestore: { restore in
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                DispatchQueue.main.asyncAfter(deadline: .now() + Self.restoreDelay(remote: remote)) {
                     restore()
                 }
             }
@@ -356,17 +427,18 @@ class AccessibilityService: ObservableObject {
         _ text: String,
         expectedTarget: UniversalActionTarget? = nil
     ) -> Bool {
-        Self.deliverTextPreservingClipboard(
+        let remote = Self.isRemoteDesktop(expectedTarget)
+        return Self.deliverTextPreservingClipboard(
             text,
             expectedTarget: expectedTarget,
             pasteboard: .general,
             hasAccessibilityPermission: checkPermission(),
             currentTarget: Self.frontmostApplicationTarget,
-            postPasteShortcut: { [weak self] in
-                self?.simulateKeyPress(keyCode: 9, modifiers: .maskCommand) ?? false
+            postPasteShortcut: {
+                Self.postPasteShortcut(remote: remote)
             },
             scheduleRestore: { restore in
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                DispatchQueue.main.asyncAfter(deadline: .now() + Self.restoreDelay(remote: remote)) {
                     restore()
                 }
             }
