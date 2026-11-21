@@ -3,6 +3,18 @@ import Testing
 @testable import Vibe_Read
 
 struct ProviderRegressionTests {
+    @Test func networkFailureUsesLocalTranscription() async throws {
+        let fixture = try ProviderFixture()
+        defer { fixture.cleanup() }
+        let service = APIService(
+            transport: { _ in throw URLError(.timedOut) },
+            localFallback: { _ in "Local recovery" },
+            dictationConfiguration: { .elevenLabs(.init(apiKey: "test", languageCode: nil)) }
+        )
+        let result = try await service.transcribeDictation(audioURL: fixture.audioURL)
+        #expect(result.rawTranscript == "Local recovery")
+    }
+
     @Test func elevenLabsUsesNativeScribeV2ContractWithoutLeakingOtherSecrets() async throws {
         let fixture = try ProviderFixture()
         defer { fixture.cleanup() }

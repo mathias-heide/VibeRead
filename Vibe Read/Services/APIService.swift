@@ -58,7 +58,7 @@ struct ProviderConnectionTestResult: Equatable, Sendable {
 /// Direct provider clients for independent dictation and Cmd+E configuration.
 /// Requests go from the Mac to the selected provider. Vibe Read has no relay.
 actor APIService {
-    static let shared = APIService()
+    static let shared = APIService(localFallback: { url in try await runLocalFallback(url) })
 
     static let elevenLabsSpeechToTextURL = URL(
         string: "https://api.elevenlabs.io/v1/speech-to-text"
@@ -126,12 +126,15 @@ actor APIService {
         }
     }
 
+    typealias LocalFallback = @Sendable (URL) async throws -> String
+    private let localFallback: LocalFallback?
     private let transport: Transport
     private let loadDictationConfiguration: DictationConfigurationLoader
     private let loadTextActionConfiguration: TextActionConfigurationLoader
 
     init(
         transport: Transport? = nil,
+        localFallback: LocalFallback? = nil,
         dictationConfiguration: @escaping DictationConfigurationLoader = {
             try await MainActor.run { try AIProviderSettings.shared.dictationConfiguration() }
         },
@@ -140,6 +143,7 @@ actor APIService {
         }
     ) {
         self.transport = transport ?? Self.makeDefaultTransport()
+        self.localFallback = localFallback
         loadDictationConfiguration = dictationConfiguration
         loadTextActionConfiguration = textActionConfiguration
     }
@@ -205,6 +209,7 @@ actor APIService {
             )
         }
         let fileExtension = Self.normalizedAudioExtension(audioURL.pathExtension)
+        do {
         let configuration = try await loadDictationConfiguration()
         try Self.validateAudioFormat(fileExtension, for: configuration)
 
@@ -246,6 +251,42 @@ actor APIService {
                 configuration: custom
             )
         }
+        } catch {
+            try Task.checkCancellation()
+            let originalError = error
+            guard let localFallback else { throw originalError }
+            do {
+                let text = try await localFallback(audioURL).trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !text.isEmpty else { throw APIError.emptyTranscript("Local backup") }
+                try Task.checkCancellation()
+                return TimedTranscript(text: text, words: nil)
+            } catch {
+                try Task.checkCancellation()
+                throw originalError
+            }
+        }
+    }
+
+    private static func runLocalFallback(_ audioURL: URL) async throws -> String {
+        let helper = UserDefaults.standard.string(forKey: "localTranscriptionHelper") ?? ""
+        guard !helper.isEmpty, FileManager.default.isExecutableFile(atPath: helper) else {
+            throw APIError.invalidConfiguration("Local transcription backup is unavailable")
+        }
+        return try await Task.detached(priority: .userInitiated) {
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: helper)
+            process.arguments = [audioURL.path]
+            let output = Pipe()
+            process.standardOutput = output
+            process.standardError = FileHandle.nullDevice
+            try process.run()
+            let data = output.fileHandleForReading.readDataToEndOfFile()
+            process.waitUntilExit()
+            guard process.terminationStatus == 0, let text = String(data: data, encoding: .utf8) else {
+                throw APIError.invalidResponse
+            }
+            return text
+        }.value
     }
 
     func transformText(_ text: String, systemPrompt: String) async throws -> String {

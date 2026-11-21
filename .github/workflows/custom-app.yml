@@ -1,0 +1,22 @@
+name: Package custom Mac app
+on:
+  push:
+    branches: [build/custom-fn-recovery-20261120]
+permissions:
+  contents: read
+jobs:
+  package:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v5
+      - name: Test recovery and build release
+        run: |
+          set -eu
+          xcodebuild -project "Vibe Read.xcodeproj" -scheme "Vibe Read" -destination "platform=macOS" -derivedDataPath "$RUNNER_TEMP/vr" CODE_SIGNING_ALLOWED=NO -only-testing:"Vibe ReadTests/SmartDictationContractTests" -only-testing:"Vibe ReadTests/ProviderRegressionTests" test
+          xcodebuild -project "Vibe Read.xcodeproj" -scheme "Vibe Read" -configuration Release -destination "generic/platform=macOS" -derivedDataPath "$RUNNER_TEMP/vr" ARCHS=arm64 ONLY_ACTIVE_ARCH=NO CODE_SIGNING_ALLOWED=NO build
+          ditto -c -k --keepParent "$RUNNER_TEMP/vr/Build/Products/Release/Vibe Read.app" "$RUNNER_TEMP/VibeRead.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: VibeRead-custom-arm64
+          path: ${{ runner.temp }}/VibeRead.zip
+          retention-days: 1

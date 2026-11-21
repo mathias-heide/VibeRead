@@ -82,7 +82,7 @@ class DictationService: ObservableObject {
     private var currentMode: RecordingMode = .normal
 
     // Timing constants
-    private let maxRecordingDuration: TimeInterval = 360  // 6 minutes max
+    private let maxRecordingDuration: TimeInterval = 1800  // 30 minutes max
     private let recordingWarningTime: TimeInterval = 300  // Warn at 5 minutes
     private let transcriptionTimeout: TimeInterval = 8    // Show "slow" warning after 8s
     private let undoDuration: TimeInterval = 5  // 5 seconds to undo
@@ -160,11 +160,11 @@ class DictationService: ObservableObject {
             // Smart Dictation has two bounded network stages. Leave enough
             // time for the text stage to fail normally so APIService can
             // return the successful raw transcript instead.
-            return APIService.transcriptionTimeout + APIService.textActionTimeout + 5
+            return 240 + APIService.textActionTimeout
         case .normal, .handsFree:
-            return 2 * APIService.transcriptionTimeout + 5
+            return 240
         case .command:
-            return APIService.transcriptionTimeout
+            return 240
         }
     }
 
