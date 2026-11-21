@@ -65,6 +65,8 @@ access.
 
 ### Dictation
 
+If a connection drops or times out during normal or hands-free dictation, Vibe Read can send the same recording to the selected provider one more time.
+
 Recorded audio goes directly from the Mac to the selected dictation provider:
 
 - ElevenLabs dictation sends recorded audio to
