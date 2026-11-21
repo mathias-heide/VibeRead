@@ -50,8 +50,25 @@ struct SmartDictationContractTests {
         )
         #expect(
             DictationService.hardTimeout(for: .normal)
-                == APIService.transcriptionTimeout
+                > 2 * APIService.transcriptionTimeout
         )
+    }
+
+    @Test @MainActor func fnRetriesTheSavedRecordingAfterTimeout() async throws {
+        let temporary = URL(fileURLWithPath: "/temporary.m4a")
+        let saved = URL(fileURLWithPath: "/saved.m4a")
+        var attempts: [URL] = []
+        let result = try await DictationService.transcribeRecording(
+            temporaryURL: temporary, savedURL: saved, mode: .handsFree
+        ) { url in
+            attempts.append(url)
+            if attempts.count == 1 {
+                throw APIService.APIError.network(URLError(.timedOut))
+            }
+            return DictationResult(rawTranscript: "sample", polishedText: "sample", durationMs: nil)
+        }
+        #expect(attempts == [saved, saved])
+        #expect(result.rawTranscript == "sample")
     }
 
     @Test func applicationContextIsBoundedAndControlCharactersAreRemoved() throws {

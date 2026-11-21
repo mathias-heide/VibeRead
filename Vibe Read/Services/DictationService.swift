@@ -161,8 +161,32 @@ class DictationService: ObservableObject {
             // time for the text stage to fail normally so APIService can
             // return the successful raw transcript instead.
             return APIService.transcriptionTimeout + APIService.textActionTimeout + 5
-        case .normal, .handsFree, .command:
+        case .normal, .handsFree:
+            return 2 * APIService.transcriptionTimeout + 5
+        case .command:
             return APIService.transcriptionTimeout
+        }
+    }
+
+    static func transcribeRecording(
+        temporaryURL: URL,
+        savedURL: URL?,
+        mode: RecordingMode,
+        transcribe: (URL) async throws -> DictationResult
+    ) async throws -> DictationResult {
+        let recordingURL = savedURL ?? temporaryURL
+        do {
+            return try await transcribe(recordingURL)
+        } catch APIService.APIError.network(let error) {
+            try Task.checkCancellation()
+            let networkError = error as NSError
+            let retryable = networkError.domain == NSURLErrorDomain &&
+                [NSURLErrorTimedOut, NSURLErrorNetworkConnectionLost,
+                 NSURLErrorCannotConnectToHost].contains(networkError.code)
+            guard (mode == .normal || mode == .handsFree), retryable else {
+                throw APIService.APIError.network(error)
+            }
+            return try await transcribe(recordingURL)
         }
     }
 
@@ -631,12 +655,16 @@ class DictationService: ObservableObject {
                 let visualParts: [VisualDictation.Part]
                 if captures.isEmpty {
                     visualParts = []
-                    result = try await APIService.shared.transcribeDictation(
-                        audioURL: url,
-                        vocabulary: AppSettings.shared.customVocabulary,
-                        transformPrompt: transformPrompt,
-                        clientId: clientID.uuidString
-                    )
+                    result = try await Self.transcribeRecording(
+                        temporaryURL: url, savedURL: savedURL, mode: mode
+                    ) { recordingURL in
+                        try await APIService.shared.transcribeDictation(
+                            audioURL: recordingURL,
+                            vocabulary: AppSettings.shared.customVocabulary,
+                            transformPrompt: transformPrompt,
+                            clientId: clientID.uuidString
+                        )
+                    }
                 } else {
                     visualParts = try await Self.transcribeVisual(audioURL: url, captures: captures)
                     let imagePaths = VisualDictation.saveCaptures(captures)
